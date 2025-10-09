@@ -1,14 +1,15 @@
+import { readFile } from "node:fs/promises";
 import { openai } from "@ai-sdk/openai";
+import { sheets, type sheets_v4 } from "@googleapis/sheets";
 import {
   convertToModelMessages,
+  generateObject,
+  stepCountIs,
   streamText,
   tool,
   type UIMessage,
-  generateObject,
-  stepCountIs,
 } from "ai";
 import { z } from "zod/v4";
-import { sheets, type sheets_v4 } from "@googleapis/sheets";
 import { cleanCsvData, getAuth } from "@/helpers";
 
 export const maxDuration = 30; // seconds
@@ -23,7 +24,10 @@ interface TabMindmap {
   tab_analysis: TabAnalysis;
 }
 
-const tabsMindmap: TabMindmap = await Bun.file("./tabs_mindmap.json").json();
+const tabsMindmap: TabMindmap = await readFile(
+  "./tabs_mindmap.json",
+  "utf-8",
+).then(JSON.parse);
 const tabsSummary = Object.entries(tabsMindmap.tab_analysis)
   .map(([t, d]) => `- ${t}: ${d.replace(/\n/g, " ")}`)
   .join("\n");
@@ -37,25 +41,30 @@ const sheetCache = new Map<
 type ProposedTab = { name: string; reason?: string };
 
 async function getChosenTabs(userQuestion: string) {
+  console.log("Selecting tabs for question...");
+  if (!userQuestion) {
+    throw new Error("User question too short or empty");
+  }
   const tabClassificationPrompt = `You are a financial model navigator. Given a user question and tab summaries, choose the minimal essential set (1-8) of tab names to inspect. Return STRICT JSON only.
 Rules:
 - Exact tab names only (case-sensitive as provided)
 - Prefer specificity; include a control/assumption tab only if needed
 Format:
-{"tabs":[{"name":"tab-name","reason":"why"}],"reasoning":"short"}
+{"tabs":[{"name":"tab-name","reason":"why"}]}
 TAB SUMMARIES:\n${tabsSummary}`;
 
   const { object } = await generateObject({
-    model: openai("gpt-4.1-nano"),
+    model: openai("gpt-5-nano"),
     system: tabClassificationPrompt,
     messages: [{ role: "user", content: userQuestion }],
     schema: z.object({
       tabs: z
         .array(z.object({ name: z.string(), reason: z.string().optional() }))
         .max(8),
-      reasoning: z.string(),
     }),
   });
+
+  console.log("Tab selection result", object);
 
   let chosenTabs: ProposedTab[] = object.tabs;
 
@@ -74,20 +83,28 @@ TAB SUMMARIES:\n${tabsSummary}`;
 }
 
 function getUserQuestion(messages: UIMessage[]): string {
-  return messages
-    .filter((m) => m.role === "user")
-    .map((m) => {
-      const c: any = (m as any).content;
-      if (typeof c === "string") return c;
-      if (Array.isArray(c)) {
-        console.log("is array", c);
-        return c
-          .map((seg) => (typeof seg === "string" ? seg : seg?.text || ""))
-          .join("\n");
-      }
-      return "";
-    })
+  const userMessages = messages.filter((m) => m.role === "user");
+  if (!userMessages.length) return ""; // or throw if required
+  const last = userMessages[userMessages.length - 1];
+  // Concatenate all text parts (ignore non-text safely)
+  return last.parts
+    .map((p: any) => (typeof p?.text === "string" ? p.text : ""))
+    .filter(Boolean)
     .join("\n");
+}
+
+async function getRows(tabName: string) {
+  const auth = await getAuth();
+  const client: sheets_v4.Sheets = sheets({ version: "v4", auth });
+  const spreadsheetId = process.env.SPREADSHEET_ID;
+  const res = await client.spreadsheets.values.get({
+    spreadsheetId,
+    range: `'${tabName}'`,
+    valueRenderOption: "UNFORMATTED_VALUE",
+    dateTimeRenderOption: "FORMATTED_STRING",
+  });
+
+  return (res.data.values as string[][]) || [];
 }
 
 export async function POST(req: Request) {
@@ -98,12 +115,18 @@ export async function POST(req: Request) {
   // ---- Phase 1: Ask model which tabs to read ----
   const userQuestion = getUserQuestion(messages);
 
+  if (!userQuestion) {
+    throw new Error("No user question");
+  }
+
   console.log("USER QUESTION", userQuestion);
 
   const { chosenTabs, chosenTabsSummary } = await getChosenTabs(userQuestion);
 
   console.log("TABS");
   console.log(JSON.stringify(chosenTabs, null, 2));
+
+  //   throw new Error("stop");
 
   // ---- Phase 2: Streaming answer with tab fetch tool ----
   const readSpreadsheetTabSchema = z.object({
@@ -114,7 +137,7 @@ export async function POST(req: Request) {
   });
 
   const result = streamText({
-    model: openai("gpt-5-nano"),
+    model: openai("gpt-5-mini"),
     messages: convertToModelMessages(messages),
     system: `You are an expert startup CFO assistant.
 You MUST first call readSpreadsheetTab for EACH of these selected tabs (one call per tab) before answering:
@@ -122,12 +145,13 @@ ${chosenTabsSummary}
 
 After fetching data, synthesize:
 1. Direct answer
-2. Supporting metrics (tab | metric | period)
+2. Supporting metrics
 3. Interpretation / insight
 4. Risks / caveats
 5. Next actions
 
 Rules:
+- Use markdown formatting
 - Cite tab names for metrics.
 - If data missing/inconclusive, state limitation & suggest remediation.
 - Do NOT fabricate metrics.
@@ -137,7 +161,6 @@ Rules:
         description:
           "Fetch and return cleaned CSV data for a specific tab (optimized for token usage)",
         inputSchema: readSpreadsheetTabSchema,
-        // @ts-ignore execute supported at runtime
         execute: async ({
           tabName,
           purpose,
@@ -153,6 +176,7 @@ Rules:
               data: "",
             };
           }
+
           try {
             const cached = sheetCache.get(tabName);
             if (cached) {
@@ -164,19 +188,10 @@ Rules:
                 cached: true,
               };
             }
-            const auth = await getAuth();
-            const client: sheets_v4.Sheets = sheets({ version: "v4", auth });
-            const spreadsheetId = process.env.SPREADSHEET_ID;
-            if (!spreadsheetId)
-              throw new Error("Missing SPREADSHEET_ID environment variable");
-            const res = await client.spreadsheets.values.get({
-              spreadsheetId,
-              range: `'${tabName}'`,
-              valueRenderOption: "UNFORMATTED_VALUE",
-              dateTimeRenderOption: "FORMATTED_STRING",
-            });
-            const rows: string[][] = (res.data.values as string[][]) || [];
-            if (!rows.length)
+
+            const rows: string[][] = await getRows(tabName);
+
+            if (!rows.length) {
               return {
                 tabName,
                 purpose,
@@ -184,12 +199,15 @@ Rules:
                 message: "Tab empty",
                 data: "",
               };
+            }
+
             const data = cleanCsvData(rows);
             const record = {
               data,
               rowCount: rows.length,
               approxChars: data.length,
             };
+
             sheetCache.set(tabName, record);
             return { tabName, purpose, success: true, ...record };
           } catch (e) {
