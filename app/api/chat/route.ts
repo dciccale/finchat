@@ -140,21 +140,19 @@ export async function POST(req: Request) {
     model: openai("gpt-5-mini"),
     messages: convertToModelMessages(messages),
     system: `You are an expert startup CFO assistant.
-You MUST first call readSpreadsheetTab for EACH of these selected tabs (one call per tab) before answering:
+You MUST first call readSpreadsheetTab for EACH of these selected tabs (one call per tab) before drafting the final answer:
 ${chosenTabsSummary}
 
-After fetching data, synthesize:
-1. Direct answer
-2. Supporting metrics
-3. Interpretation / insight
-4. Risks / caveats
-5. Next actions
+When ALL required tab reads are complete, produce a single comprehensive markdown answer.
 
-Rules:
-- Use markdown formatting
-- Cite tab names for metrics.
-- If data missing/inconclusive, state limitation & suggest remediation.
-- Do NOT fabricate metrics.
+Formatting Rules:
+- Use valid GitHub-flavored markdown.
+- Never invent metrics; if unknown, write "N/A".
+- If no metric table applies, still render the section with a short sentence explaining why.
+- Prefer concise numbers: 1.23M, 4.5K, 38%. Show denominators when useful.
+- Keep total answer under ~600 tokens unless explicitly asked for more depth.
+
+After ALL required tab reads are complete, immediately produce the final markdown answer (do not request additional tool calls). Each tool result may be truncated. If truncated, rely on provided metadata (rowCount, approxChars, headers) and clearly note any limitations in Risks & Caveats.
 `,
     tools: {
       readSpreadsheetTab: tool({

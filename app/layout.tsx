@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
+import { ThemeProvider } from "@/components/theme-provider";
+import { ThemeToggle } from "@/components/theme-toggle";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -23,11 +25,21 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" className="dark">
+    <html lang="en" suppressHydrationWarning>
       <body
-        className={`${geistSans.variable} ${geistMono.variable} antialiased`}
+        className={`${geistSans.variable} ${geistMono.variable} antialiased min-h-dvh flex flex-col`}
       >
-        {children}
+        <ThemeProvider>
+          <header className="w-full border-b bg-background/80 backdrop-blur supports-[backdrop-filter]:bg-background/60 sticky top-0 z-40">
+            <div className="max-w-5xl mx-auto px-6 h-14 flex items-center justify-between">
+              <div className="font-semibold tracking-tight">nxtcfo</div>
+              <ThemeToggle />
+            </div>
+          </header>
+          <main className="flex-1 w-full max-w-5xl mx-auto px-6 py-8">
+            {children}
+          </main>
+        </ThemeProvider>
       </body>
     </html>
   );
