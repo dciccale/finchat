@@ -1,20 +1,24 @@
-import { GoogleAuth } from "google-auth-library";
+import { JWT } from "google-auth-library";
 
-export async function getAuth(): Promise<GoogleAuth> {
+// Cache the JWT client so we don't re-create it for every request/script run.
+let cachedJwt: JWT | null = null;
+
+export async function getAuth(): Promise<JWT> {
+  if (cachedJwt) return cachedJwt;
   const rawKey = process.env.GOOGLE_PRIVATE_KEY;
   const privateKey = rawKey ? rawKey.replace(/\\n/g, "\n") : undefined;
-  if (!process.env.GOOGLE_CLIENT_EMAIL || !privateKey) {
+  const email = process.env.GOOGLE_CLIENT_EMAIL;
+  if (!email || !privateKey) {
     throw new Error(
       "Missing GOOGLE_CLIENT_EMAIL or GOOGLE_PRIVATE_KEY environment variables.",
     );
   }
-  return new GoogleAuth({
-    credentials: {
-      client_email: process.env.GOOGLE_CLIENT_EMAIL,
-      private_key: privateKey,
-    },
+  cachedJwt = new JWT({
+    email,
+    key: privateKey,
     scopes: ["https://www.googleapis.com/auth/spreadsheets"],
   });
+  return cachedJwt;
 }
 
 export function cleanCsvData(rows: string[][]): string {
@@ -29,6 +33,7 @@ export function cleanCsvData(rows: string[][]): string {
     const trimmed = r.slice(0, end + 1);
     if (trimmed.length > maxCols) maxCols = trimmed.length;
   }
+
   const csvLines: string[] = [];
   for (const r of rows) {
     let end = r.length - 1;
@@ -40,6 +45,7 @@ export function cleanCsvData(rows: string[][]): string {
     const trimmed = r.slice(0, end + 1);
     csvLines.push(trimmed.map((v) => csvEscape(String(v ?? ""))).join(","));
   }
+
   const compressed: string[] = [];
   let lastEmpty = false;
   for (const line of csvLines) {

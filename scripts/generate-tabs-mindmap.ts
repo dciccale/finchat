@@ -27,7 +27,7 @@ async function analyzeFinancialSpreadsheet() {
   console.log("Starting financial spreadsheet analysis...");
 
   // Read the JSON file
-  const file = Bun.file("sheets_export.json");
+  const file = Bun.file("tabs_summary.json");
   const sheetsData: SheetData[] = await file.json();
 
   // Convert array to object for easier access
